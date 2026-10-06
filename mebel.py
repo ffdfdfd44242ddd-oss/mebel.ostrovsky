@@ -108,7 +108,7 @@ FAVICON_URL = "https://hliafkrpvmntpctmqwfu.supabase.co/storage/v1/object/public
 # ============================================================
 # <<<DEFAULT_DATA_START>>>
 DEFAULT_DATA = {'seo': {'favicon_url': 'https://hliafkrpvmntpctmqwfu.supabase.co/storage/v1/object/public/site-images/logo/logo-512.jpg', 'title': 'Кухни Островский — кухни на заказ в Ростове, Батайске и Азове | Мебель под ключ',
-         'keywords': 'кухни остров, кухни островский, кухни на заказ ростов, кухни батайск, кухни азов, мебель на заказ',
+         'keywords': 'кухни на заказ Ростов-на-Дону, кухни на заказ Ростов, кухни Ростов, кухни Батайск, кухни на заказ Батайск, кухни Азов, кухни на заказ Азов, кухонный гарнитур Ростов, мебель на заказ Ростов, корпусная мебель Ростов, шкафы на заказ Ростов, гардеробные на заказ Ростов, прихожие на заказ Ростов, кухонный гарнитур Батайск, мебель на заказ Батайск, корпусная мебель Батайск, шкафы на заказ Батайск, гардеробные Батайск, прихожие Батайск, кухонный гарнитур Азов, мебель на заказ Азов, корпусная мебель Азов, шкафы на заказ Азов, гардеробные Азов, прихожие Азов, кухня по индивидуальным размерам Ростов, кухня по проекту Ростов, угловая кухня Ростов, прямая кухня Ростов, П-образная кухня Ростов, кухня с островом Ростов, современная кухня Ростов, классическая кухня Ростов, кухни Ростовская область, мебель на заказ Ростовская область',
          'og_image': 'https://hliafkrpvmntpctmqwfu.supabase.co/storage/v1/object/public/site-images/logo/logo-512.jpg',
          'description': 'Кухни на заказ в Ростове-на-Дону, Батайске и Азове от мастерской «Кухни Островский». Бесплатный замер и '
                         '3D-проект, собственное производство, монтаж под ключ. ☎ +7 (950) 846-53-97',
@@ -128,6 +128,7 @@ DEFAULT_DATA = {'seo': {'favicon_url': 'https://hliafkrpvmntpctmqwfu.supabase.co
          'robots': '',
          'extra_urls': []},
  'code': {'head': '', 'body': ''},
+ 'lead_form': {'enabled': True, 'title': 'Оставить заявку', 'subtitle': 'Оставьте номер — свяжемся и обсудим задачу.', 'button': 'Оставить заявку'},
  'sections': {'stats': True, 'about': True, 'consult': True, 'works': True, 'reviews': True,
               'services': True, 'process': True, 'guarantees': True, 'cities': True, 'cta': True,
               'contacts': True, 'footer': True, 'cookie': True},
@@ -2375,6 +2376,98 @@ def _storage_list(limit=120):
 
 
 # ============================================================
+#  ЗАЯВКИ С САЙТА + ЖУРНАЛ
+# ============================================================
+LEADS_FILE = "leads.json"
+AUDIT_FILE = "audit.json"
+_leads_lock = threading.Lock()
+_audit_lock = threading.Lock()
+
+
+def _private_json_get(filename, default):
+    try:
+        blob = _storage_get(BACKUP_BUCKET, filename)
+        if not blob:
+            return _json_clone(default)
+        obj = json.loads(blob.decode("utf-8"))
+        return obj
+    except Exception as e:
+        print("[private-json] read {}: {}".format(filename, e), flush=True)
+        return _json_clone(default)
+
+
+def _private_json_put(filename, obj):
+    try:
+        blob = json.dumps(obj, ensure_ascii=False, indent=1).encode("utf-8")
+        return bool(_storage_put(BACKUP_BUCKET, filename, blob, "application/json", upsert=True))
+    except Exception as e:
+        print("[private-json] write {}: {}".format(filename, e), flush=True)
+        return False
+
+
+def _load_leads():
+    obj = _private_json_get(LEADS_FILE, [])
+    return obj if isinstance(obj, list) else []
+
+
+def _save_leads(items):
+    return _private_json_put(LEADS_FILE, items[-500:])
+
+
+def _add_lead(name, phone, message, page, ip=""):
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    ip_hash = hashlib.sha256((ip + "::" + (_session_secret().hex()[:16])).encode("utf-8")).hexdigest()[:16] if ip else ""
+    item = {
+        "id": uuid.uuid4().hex[:12], "at": now, "name": name[:120],
+        "phone": phone[:80], "message": message[:1000], "page": page[:300],
+        "ip_hash": ip_hash, "read": False,
+    }
+    with _leads_lock:
+        items = _load_leads()
+        items.insert(0, item)
+        ok = _save_leads(items)
+    return item if ok else None
+
+
+def _get_leads():
+    with _leads_lock:
+        return _load_leads()
+
+
+def _mark_lead(lead_id=None, read=True):
+    changed = False
+    with _leads_lock:
+        items = _load_leads()
+        for it in items:
+            if lead_id is None or str(it.get("id")) == str(lead_id):
+                if bool(it.get("read")) != bool(read):
+                    it["read"] = bool(read)
+                    changed = True
+                if lead_id is not None:
+                    break
+        if changed:
+            _save_leads(items)
+    return changed
+
+
+def _audit(action, who="", details=""):
+    item = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "action": str(action)[:80],
+            "who": str(who)[:100], "details": str(details)[:500]}
+    with _audit_lock:
+        items = _private_json_get(AUDIT_FILE, [])
+        if not isinstance(items, list):
+            items = []
+        items.insert(0, item)
+        _private_json_put(AUDIT_FILE, items[:300])
+
+
+def _get_audit():
+    with _audit_lock:
+        items = _private_json_get(AUDIT_FILE, [])
+    return items if isinstance(items, list) else []
+
+
+# ============================================================
 #  AI (YandexGPT / GigaChat)
 # ============================================================
 def _ai_yandex(system, user, max_tokens=700):
@@ -2708,6 +2801,7 @@ def save_versioned(data, client_rev=None, force=False, who=""):
     _db_state["write"] = ok
     if not ok:
         return {"ok": False, "error": "запись в Supabase не прошла (проверьте SUPABASE_SERVICE_KEY на хостинге)"}
+    _audit("Сохранение контента", who, "rev {} → {}".format(cur_rev, cur_rev + 1))
     verified = False
     check, ok_read = _fetch_from_supabase(timeout=10)
     if ok_read and isinstance(check, dict):
@@ -2819,6 +2913,56 @@ def _bump_data_sig():
     _data_sig[0] += 1
 
 
+def _inject_site_ui(html, data):
+    'Добавляет компактную форму заявки и короткую заставку без изменения page.html.'
+    lead = data.get("lead_form") or {}
+    if lead.get("enabled", True) and 'id="ostLeadModal"' not in html:
+        brand = data.get("brand") or {}
+        seo = data.get("seo") or {}
+        name = _escape(str(brand.get("name") or "Кухни Островский"))
+        logo = _escape(str(seo.get("favicon_url") or brand.get("logo_url") or "/favicon-192x192.png"))
+        title = _escape(str(lead.get("title") or "Оставить заявку"))
+        subtitle = _escape(str(lead.get("subtitle") or "Оставьте номер — свяжемся и обсудим задачу."))
+        button = _escape(str(lead.get("button") or "Оставить заявку"))
+        widget = """<style id="ostLeadStyles">
+#ostLeadFab{position:fixed;right:22px;bottom:22px;z-index:8990;border:1px solid rgba(236,207,160,.5);background:linear-gradient(135deg,#ecd09c,#c89e58);color:#17120b;border-radius:999px;padding:13px 18px;font:700 13px/1 system-ui;box-shadow:0 16px 40px -18px #000;cursor:pointer;transition:.3s}
+#ostLeadFab:hover{transform:translateY(-2px)}
+#ostLeadModal{position:fixed;inset:0;z-index:8999;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(8,6,4,.72);backdrop-filter:blur(12px)}
+#ostLeadModal.open{display:flex}
+.ostLeadCard{width:min(470px,100%);position:relative;border:1px solid rgba(236,207,160,.25);border-radius:24px;background:linear-gradient(160deg,rgba(28,23,17,.98),rgba(12,10,8,.98));box-shadow:0 35px 90px -35px #000;padding:28px}
+.ostLeadTop{display:flex;align-items:center;gap:12px;margin-bottom:20px}.ostLeadLogo{width:48px;height:48px;border-radius:15px;object-fit:cover;border:1px solid rgba(236,207,160,.28)}
+.ostLeadCard h3{font:600 25px/1.05 Georgia,serif;color:#fff;margin:0}.ostLeadSub{color:#b9ad9a;font:13px/1.55 system-ui;margin:5px 0 0}
+.ostLeadClose{position:absolute;right:16px;top:14px;width:34px;height:34px;border:1px solid rgba(255,255,255,.1);border-radius:50%;background:rgba(255,255,255,.04);color:#fff;cursor:pointer}
+.ostLeadField{margin:0 0 12px}.ostLeadField label{display:block;color:#eccfa0;font:700 10px/1 system-ui;letter-spacing:1.2px;text-transform:uppercase;margin:0 0 6px}
+.ostLeadField input,.ostLeadField textarea{width:100%;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:rgba(0,0,0,.28);color:#fff;padding:12px 13px;font:14px system-ui;outline:none}
+.ostLeadField textarea{min-height:82px;resize:vertical}.ostLeadSend{width:100%;border:0;border-radius:12px;padding:13px 16px;background:linear-gradient(135deg,#ecd09c,#c89e58);color:#17120b;font:800 13px system-ui;cursor:pointer;margin-top:4px}
+.ostLeadNote{color:#71685c;font:10.5px/1.45 system-ui;text-align:center;margin:9px 2px 0}.ostLeadHp{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}
+@media(max-width:600px){#ostLeadFab{right:14px;bottom:14px;padding:12px 15px}.ostLeadCard{padding:24px 18px;border-radius:20px}}
+</style>
+<button id="ostLeadFab" type="button">""" + button + """</button>
+<div id="ostLeadModal" aria-hidden="true"><div class="ostLeadCard" role="dialog" aria-modal="true">
+<button class="ostLeadClose" id="ostLeadClose" type="button" aria-label="Закрыть">×</button>
+<div class="ostLeadTop"><img class="ostLeadLogo" src=""" + logo + """ alt=""" + name + """><div><h3>""" + title + """</h3><p class="ostLeadSub">""" + subtitle + """</p></div></div>
+<form id="ostLeadForm" autocomplete="on">
+<div class="ostLeadField"><label>Имя</label><input name="name" maxlength="120" placeholder="Как к вам обращаться"></div>
+<div class="ostLeadField"><label>Телефон *</label><input name="phone" type="tel" maxlength="80" required placeholder="+7 (___) ___-__-__"></div>
+<div class="ostLeadField"><label>Что нужно сделать</label><textarea name="message" maxlength="1000" placeholder="Например: нужна кухня по размерам"></textarea></div>
+<div class="ostLeadHp"><input name="website" tabindex="-1" autocomplete="off"></div>
+<button class="ostLeadSend" type="submit">Отправить заявку</button><p class="ostLeadNote">Контакт нужен только для связи по заявке.</p>
+</form></div></div>
+<script>(function(){const f=document.getElementById('ostLeadFab'),m=document.getElementById('ostLeadModal'),c=document.getElementById('ostLeadClose'),form=document.getElementById('ostLeadForm');function o(){m.classList.add('open');m.setAttribute('aria-hidden','false');setTimeout(()=>form&&form.querySelector('input[name=name]')?.focus(),70)}function x(){m.classList.remove('open');m.setAttribute('aria-hidden','true')}f&&f.addEventListener('click',o);c&&c.addEventListener('click',x);m&&m.addEventListener('click',e=>{if(e.target===m)x()});document.addEventListener('keydown',e=>{if(e.key==='Escape')x()});form&&form.addEventListener('submit',async e=>{e.preventDefault();const b=form.querySelector('.ostLeadSend'),fd=new FormData(form),body={name:String(fd.get('name')||'').trim(),phone:String(fd.get('phone')||'').trim(),message:String(fd.get('message')||'').trim(),website:String(fd.get('website')||''),page:location.href};b.disabled=true;b.textContent='Отправляю…';try{const r=await fetch('/api/lead',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||'Ошибка');form.reset();b.textContent='Заявка отправлена ✓';setTimeout(()=>{b.textContent='Отправить заявку';b.disabled=false;x()},850)}catch(err){b.disabled=false;b.textContent='Отправить заявку';alert('Не удалось отправить заявку. Позвоните или напишите напрямую.')}})})();</script>"""
+        loader = """<style id="ostLoaderStyles">
+#ostSiteLoader{position:fixed;inset:0;z-index:100000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:radial-gradient(circle at 50% 42%,rgba(236,207,160,.16),transparent 27%),radial-gradient(circle at 20% 80%,rgba(163,124,63,.15),transparent 35%),linear-gradient(135deg,#100d09,#070605 58%,#161007);transition:opacity .28s ease,visibility .28s ease}
+#ostSiteLoader img{width:76px;height:76px;object-fit:cover;border-radius:22px;border:1px solid rgba(236,207,160,.35);box-shadow:0 0 45px rgba(236,207,160,.18),0 18px 45px -25px #000}
+.ostLoaderName{font:600 23px/1 Georgia,serif;letter-spacing:.8px;color:#f8efe0}.ostLoaderLine{width:80px;height:1px;background:linear-gradient(90deg,transparent,#ecd09c,transparent);opacity:.7}
+#ostSiteLoader.done{opacity:0;visibility:hidden;pointer-events:none}
+html.ost-lite .panel .bg,html.ost-lite .panel .content{transform:none!important}html.ost-lite *,html.ost-lite *::before,html.ost-lite *::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+</style>"""
+        html = html.replace("</head>", loader + "</head>", 1)
+        html = html.replace("</body>", widget + '<div id="ostSiteLoader"><img src="' + logo + '" alt=""><div class="ostLoaderName">' + name + '</div><div class="ostLoaderLine"></div></div><script>(function(){try{var c=navigator.connection;if((c&&c.saveData)||navigator.hardwareConcurrency&&navigator.hardwareConcurrency<=4)document.documentElement.classList.add("ost-lite")}catch(e){}var l=document.getElementById("ostSiteLoader");var seen=false;try{seen=sessionStorage.getItem("ostLoaderSeen")==="1"}catch(e){}if(seen){l.remove();return}try{sessionStorage.setItem("ostLoaderSeen","1")}catch(e){}window.addEventListener("load",function(){setTimeout(function(){l.classList.add("done");setTimeout(function(){l.remove()},330)},260)});setTimeout(function(){l.classList.add("done")},1200)})();</script></body>', 1)
+    return html
+
+
 def render_site():
     """Готовый HTML кэшируется до смены данных — страница отдаётся мгновенно."""
     data = load_data()
@@ -2835,6 +2979,7 @@ def render_site():
         print("[render] ОШИБКА: {}".format(e), flush=True)
         html = _page_template()
     html = _proxify_urls(html)
+    html = _inject_site_ui(html, data)
     with _render_lock:
         _render_cache["sig"] = sig
         _render_cache["html"] = html
@@ -3384,6 +3529,30 @@ ADMIN_SCHEMA = [
         {"path": "page404.button", "label": "Кнопка", "type": "text"},
      ]},
 
+    {"id": "lead_settings", "group": "Заявки", "title": "Форма заявки",
+     "hint": "Компактная форма на сайте. Новые обращения автоматически появляются в разделе «Заявки».",
+     "fields": [
+         {"path": "lead_form.enabled", "label": "Показывать форму на сайте", "type": "check", "chkLabel": "включено"},
+         {"path": "lead_form.title", "label": "Заголовок формы", "type": "text"},
+         {"path": "lead_form.subtitle", "label": "Подзаголовок", "type": "textarea", "rows": 2},
+         {"path": "lead_form.button", "label": "Текст плавающей кнопки", "type": "text"},
+     ]},
+
+    {"id": "guide", "group": "Помощь", "title": "Инструкция для админов",
+     "hint": "Подробный порядок работы с сайтом. Если сомневаетесь — сначала сохраните копию.",
+     "fields": [
+         {"type": "info", "text": "<b>1. Изменение текста</b>\nОткройте нужный раздел слева → измените поле → нажмите «Сохранить». До сохранения сайт не меняется."},
+         {"type": "info", "text": "<b>2. Фото</b>\nВ поле картинки можно вставить ссылку, загрузить файл кнопкой «Файл» или выбрать уже загруженное через «Медиа». Лучше загружать JPG/WebP до 8 МБ."},
+         {"type": "info", "text": "<b>3. Списки</b>\nРаботы, услуги, отзывы и этапы добавляются кнопкой «+ Добавить». Стрелки меняют порядок. Удаление просит подтверждение."},
+         {"type": "info", "text": "<b>4. Заявки</b>\nВсе обращения с формы сайта находятся в разделе «Заявки». Новые отмечены золотой точкой. Откройте телефон клиента для звонка и после просмотра отметьте заявку прочитанной."},
+         {"type": "info", "text": "<b>5. Сохранение</b>\nЕсли снизу появилась панель «Есть несохранённые изменения», нажмите «Сохранить». Перед перезаписью автоматически создаётся резервная копия."},
+         {"type": "info", "text": "<b>6. Если что-то испортили</b>\nНе паникуйте. Нажмите «Отменить», если ещё не сохраняли. Если уже сохранили — откройте «История версий», подставьте нужную копию и сохраните её."},
+         {"type": "info", "text": "<b>7. SEO</b>\nTitle и Description должны описывать реальные услуги и города. Не вставляйте огромные списки слов в видимый текст сайта — поисковику важнее полезный контент."},
+         {"type": "info", "text": "<b>8. Что нельзя выдумывать</b>\nНе добавляйте от себя цены, сроки, гарантию, бесплатные услуги, материалы или города. Если факт неизвестен — сначала спросите Романа."},
+         {"type": "info", "text": "<b>9. Проверка сайта</b>\nПосле крупных изменений нажмите «Открыть сайт», проверьте телефон, кнопки, фото и мобильную версию. На телефоне меню и форма должны оставаться удобными."},
+         {"type": "info", "text": "<b>10. Правило перед публикацией</b>\nСначала проверить → потом сохранить → потом открыть сайт в новой вкладке → затем ещё раз проверить на телефоне."}
+     ]},
+
     {"id": "tools", "group": "Инструменты", "title": "Инструменты и связь",
      "hint": "Проверка связей, бэкап контента, генерация текстов через AI.",
      "fields": [
@@ -3464,6 +3633,9 @@ nav.side::-webkit-scrollbar-thumb{background:rgba(236,207,160,.16);border-radius
 .side-search{position:relative;margin:0 14px 12px;animation:fadeUp .5s cubic-bezier(.16,1,.3,1) both}
 .side-search input{width:100%;padding:10px 12px 10px 33px;background:rgba(0,0,0,.4);border:1px solid var(--bd);border-radius:8px;color:#fff;font-size:13px;font-family:inherit;transition:border-color .35s,box-shadow .35s,background .35s}
 .side-search input:focus{outline:none;border-color:rgba(212,175,106,.5);box-shadow:0 0 0 3px rgba(212,175,106,.09);background:rgba(0,0,0,.55)}
+
+nav.side a.changed{box-shadow:inset 0 0 0 1px rgba(236,207,160,.18);margin:2px 8px;border-radius:8px;padding-left:18px}
+nav.side a.changed:after{content:"ВНИМАНИЕ";font-size:8px;letter-spacing:.7px;color:#ecd09c;opacity:.85;animation:adminAttention 1.8s infinite}
 .side-search .ic{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--g);opacity:.75;font-size:14px;pointer-events:none}
 nav.side a{position:relative;display:flex;align-items:center;gap:9px;padding:10px 18px;color:var(--mut);font-size:13.5px;cursor:pointer;border-left:2px solid transparent;transition:color .35s,background .35s,padding-left .35s,border-color .35s}
 nav.side a:hover{color:#fff;background:rgba(255,255,255,.035);padding-left:22px}
@@ -3536,6 +3708,20 @@ mark.hit{background:rgba(212,175,106,.25);color:#fff;border-radius:3px;padding:0
  .savebar{left:12px;right:12px;transform:none;max-width:none}
  .savebar.show{bottom:12px}
 }
+<style id="ostAdminUpgrade">
+.noticePulse{position:relative;border-color:rgba(236,207,160,.38)!important;box-shadow:0 0 0 1px rgba(236,207,160,.05) inset,0 10px 35px -24px #000}
+.noticePulse:after{content:"";position:absolute;right:10px;top:10px;width:7px;height:7px;border-radius:50%;background:#e5bd70;box-shadow:0 0 0 0 rgba(229,189,112,.55);animation:adminAttention 1.8s infinite}
+@keyframes adminAttention{0%,65%,100%{box-shadow:0 0 0 0 rgba(229,189,112,0)}35%{box-shadow:0 0 0 7px rgba(229,189,112,.0)}}
+.dashboard{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 22px}
+.dash{position:relative;overflow:hidden;border:1px solid rgba(236,207,160,.12);background:linear-gradient(145deg,rgba(255,255,255,.045),rgba(255,255,255,.018));border-radius:16px;padding:16px;box-shadow:0 20px 45px -38px #000}
+.dash b{display:block;font:600 25px/1 Georgia,serif;color:#fff}.dash span{display:block;margin-top:5px;color:#8f8577;font-size:11px}
+.lead-card,.audit-row{border:1px solid rgba(236,207,160,.12);background:linear-gradient(145deg,rgba(255,255,255,.035),rgba(255,255,255,.018));border-radius:15px;padding:15px;margin-bottom:10px;transition:.25s}
+.lead-card.unread{border-color:rgba(236,207,160,.38);box-shadow:0 0 0 1px rgba(236,207,160,.04) inset}
+.lead-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.lead-name{font-weight:700;color:#fff}.lead-date{font-size:11px;color:#756d61}
+.lead-phone{display:inline-flex;margin-top:8px;color:#ecd09c;font-weight:700;text-decoration:none}.lead-msg{margin-top:10px;color:#c7bdaf;font-size:13px;white-space:pre-wrap}.lead-actions{display:flex;gap:7px;margin-top:12px;flex-wrap:wrap}
+.audit-row{display:grid;grid-template-columns:145px 180px 1fr;gap:12px;color:#c7bdaf;font-size:12px}.audit-row b{color:#ecd09c}
+@media(max-width:700px){.dashboard{grid-template-columns:1fr 1fr}.audit-row{grid-template-columns:1fr}.lead-top{display:block}}
+@media(max-width:480px){.dashboard{grid-template-columns:1fr}}
 </style></head><body>
 <header>
 <div class="brand"><span class="mark"></span>Кухни Островский<span>CMS</span><span class="status" id="status">Загрузка…</span><span class="status" id="revInfo" style="background:rgba(255,255,255,.05);color:#a2988a;border:1px solid rgba(255,255,255,.08)">rev —</span></div>
@@ -3622,10 +3808,47 @@ function searchHTML(){
   });
   return h;
 }
+function renderLeads(){
+  q('#main').innerHTML='<h2>Заявки</h2><p class="hint">Новые обращения с формы сайта. Здесь только реальные отправленные заявки — ничего не нужно переносить вручную.</p><div class="dashboard"><div class="dash"><b id="leadTotal">—</b><span>всего заявок</span></div><div class="dash"><b id="leadUnread">—</b><span>новых</span></div><div class="dash"><b>24/7</b><span>форма принимает обращения</span></div></div><div class="actions" style="margin-bottom:16px"><button class="btn btn-gold" id="refreshLeads">Обновить</button><button class="btn" id="readAllLeads">Отметить всё прочитанным</button></div><div id="leadsOut"><div class="skel big"></div><div class="skel"></div></div>';
+  q('#refreshLeads').onclick=loadLeads;
+  q('#readAllLeads').onclick=function(){api('/admin/api/leads/read',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(loadLeads)};
+  loadLeads();
+}
+function loadLeads(){
+  var out=q('#leadsOut');if(out)out.innerHTML='<div class="skel big"></div><div class="skel"></div>';
+  api('/admin/api/leads').then(function(j){
+    var items=Array.isArray(j.items)?j.items:[];
+    var total=q('#leadTotal'),un=q('#leadUnread');if(total)total.textContent=items.length;if(un)un.textContent=j.unread||0;
+    var badge=q('#leadBadge');if(badge){badge.textContent=j.unread||0;badge.style.display=(j.unread||0)?'inline-flex':'none'}
+    if(!items.length){if(out)out.innerHTML='<div class="info"><b>Пока заявок нет.</b><br>Когда посетитель заполнит форму на сайте, обращение появится здесь.</div>';return}
+    if(out)out.innerHTML=items.map(function(it){
+      var cls=it.read?'':' unread',dt=esc(String(it.at||'').replace('T',' ')),name=esc(it.name||'Без имени'),phone=esc(it.phone||''),msg=esc(it.message||'Без комментария');
+      return '<article class="lead-card'+cls+'"><div class="lead-top"><div><div class="lead-name">'+name+'</div><a class="lead-phone" href="tel:'+esc(it.phone||'')+'">'+phone+'</a></div><span class="lead-date">'+dt+'</span></div><div class="lead-msg">'+msg+'</div><div class="lead-actions">'+(it.read?'':'<button class="btn mini" data-lead-read="'+esc(it.id)+'">Прочитано</button>')+'<a class="btn mini btn-gold" href="tel:'+esc(it.phone||'')+'">Позвонить</a></div></article>';
+    }).join('');
+    qa('[data-lead-read]').forEach(function(b){b.onclick=function(){api('/admin/api/leads/read',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:b.dataset.leadRead})}).then(loadLeads)}});
+  }).catch(function(e){if(out)out.innerHTML='<div class="info">'+esc(e.message)+'</div>'});
+}
+function renderAudit(){
+  q('#main').innerHTML='<h2>Журнал действий</h2><p class="hint">Кто и когда сохранял изменения в админке. Последние 300 записей.</p><div class="actions" style="margin-bottom:16px"><button class="btn btn-gold" id="refreshAudit">Обновить журнал</button></div><div id="auditOut"><div class="skel big"></div></div>';
+  q('#refreshAudit').onclick=loadAudit;loadAudit();
+}
+function loadAudit(){
+  api('/admin/api/audit').then(function(j){
+    var out=q('#auditOut'),items=Array.isArray(j.items)?j.items:[];
+    if(!items.length){out.innerHTML='<div class="info">Журнал пока пуст. Первая запись появится после сохранения.</div>';return}
+    out.innerHTML=items.map(function(x){return '<div class="audit-row"><b>'+esc(x.at||'')+'</b><span>'+esc(x.action||'')+'</span><span>'+esc(x.who||'администратор')+(x.details?' · '+esc(x.details):'')+'</span></div>'}).join('');
+  }).catch(function(e){q('#auditOut').innerHTML='<div class="info">'+esc(e.message)+'</div>'});
+}
+function refreshLeadBadge(){
+  api('/admin/api/leads').then(function(j){var b=q('#leadBadge');if(!b)return;b.textContent=j.unread||0;b.style.display=(j.unread||0)?'inline-flex':'none'}).catch(function(){});
+}
+
 function render(){
   var groups={},order=[];
   SCHEMA.forEach(function(t){if(!groups[t.group]){groups[t.group]=[];order.push(t.group)}groups[t.group].push(t)});
   var nav='<div class="side-search"><span class="ic">⌕</span><input id="search" type="search" placeholder="Поиск по всем полям…" value="'+esc(SEARCH)+'"></div>';
+  nav+='<div class="nav-group">Рабочее</div><a data-tab="leads" class="'+(TAB==='leads'?'active':'')+'"><span class="dot"></span><span class="cap">Заявки</span><span id="leadBadge" class="status" style="display:none;padding:2px 7px;margin-left:auto;background:rgba(236,207,160,.15);color:#ecd09c;border:1px solid rgba(236,207,160,.25)">0</span></a>';
+  nav+='<a data-tab="audit" class="'+(TAB==='audit'?'active':'')+'"><span class="dot"></span><span class="cap">Журнал действий</span></a>';
   order.forEach(function(g){
     nav+='<div class="nav-group">'+esc(g)+'</div>';
     groups[g].forEach(function(t){
@@ -3639,9 +3862,11 @@ function render(){
     bind();
     var cs=q('#clearSearch');
     if(cs)cs.addEventListener('click',function(e){e.preventDefault();SEARCH='';render()});
-    updateBar();
+    updateBar();refreshLeadBadge();
     return;
   }
+  if(TAB==='leads'){renderLeads();updateBar();refreshLeadBadge();return}
+  if(TAB==='audit'){renderAudit();updateBar();refreshLeadBadge();return}
   var tab=SCHEMA.filter(function(t){return t.id===TAB})[0]||SCHEMA[0];
   var h='<h2>'+esc(tab.title)+'</h2>'+(tab.hint?'<p class="hint">'+tab.hint+'</p>':'');
   (tab.fields||[]).forEach(function(f){h+=fieldHTML(f,'')});
@@ -3680,7 +3905,7 @@ function fieldHTML(f,base,rawLabel){
       +'<div class="prev" data-prev="'+p+'">'+(v?'<img src="'+esc(v)+'" loading="lazy">':'')+'</div>'
       +(f.hint?'<div class="fhint">'+f.hint+'</div>':'')+'</div>';
   }
-  if(f.type==='textarea')inp='<textarea data-path="'+p+'" rows="'+(f.rows||3)+'"'+(f.mono?' class="mono"':'')+' placeholder="'+esc(f.placeholder||'')+'">'+esc(v)+'</textarea>';
+  if(f.type==='textarea')inp='<textarea data-path="'+p+'" rows="'+(f.rows||3)+'"'+(f.mono?' class="mono"':'')+' placeholder="'+esc(f.placeholder||'')+'">'+esc(v)+'</textarea>'+(p.endsWith('.icon')?'<div class="fhint">Иконка SVG хранится отдельно. Если поле пустое — на сайте используется аккуратная базовая иконка.</div>':'');
   else if(f.type==='check')inp='<label class="chk"><input type="checkbox" data-path="'+p+'"'+(v?' checked':'')+'> '+(f.chkLabel||'включено')+'</label>';
   else if(f.type==='select')inp='<select data-path="'+p+'">'+(f.options||[]).map(function(o){return '<option value="'+esc(o)+'"'+(String(v)===o?' selected':'')+'>'+esc(o)+'</option>'}).join('')+'</select>';
   else if(f.type==='color')inp='<div class="color-row"><input type="color" data-path="'+p+'" value="'+esc(normColor(v))+'"><input type="text" data-path="'+p+'" value="'+esc(v)+'"></div>';
@@ -3822,6 +4047,7 @@ function doAction(act){
 
 function save(force){
   if(!DATA){toast('Данные ещё не загрузились',true);return}
+  if(!force && dirty && !confirm('Проверили изменения?\n\nПосле сохранения они появятся на сайте.\nЕсли всё верно — нажмите «ОК».'))return;
   setStatus(force?'Перезапись...':'Сохранение...','saving');
   fetch('/admin/api/save',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({data:DATA,rev:REV,force:!!force})})
@@ -3924,6 +4150,7 @@ document.addEventListener('keydown',function(e){
 });
 window.addEventListener('beforeunload',function(e){if(dirty){e.preventDefault();e.returnValue=''}});
 load();
+setInterval(refreshLeadBadge,15000);
 </script></body></html>"""
 
 ADMIN_HTML = ADMIN_HTML.replace("__SCHEMA__", _SCHEMA_JSON)
@@ -4066,6 +4293,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
 
+        # Единый адрес: www -> основной домен. Админка/локальный хост не трогаем.
+        host = (self.headers.get("Host") or "").split(":", 1)[0].lower()
+        if host.startswith("www.") and path not in ("/admin", "/admin/login"):
+            target_host = _host(load_data()).lower()
+            if target_host and host[4:] == target_host:
+                loc = _domain(load_data()) + (self.path if self.path else "/")
+                self._redir(loc)
+                return
+
         if path == "/img":
             self._route_img()
             return
@@ -4106,6 +4342,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "no auth"}, 401)
                 return
             self._json({"items": _storage_list(), "bucket": BUCKET})
+            return
+        if path == "/admin/api/leads":
+            if not self._admin():
+                self._json({"error": "no auth"}, 401)
+                return
+            items = _get_leads()
+            self._json({"items": items, "unread": sum(1 for x in items if not x.get("read"))})
+            return
+        if path == "/admin/api/audit":
+            if not self._admin():
+                self._json({"error": "no auth"}, 401)
+                return
+            self._json({"items": _get_audit()})
             return
         if path == "/admin/api/history":
             if not self._admin():
@@ -4170,6 +4419,33 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
 
+        if path == "/api/lead":
+            try:
+                req = json.loads(self._body().decode("utf-8") or "{}")
+            except Exception:
+                self._json({"error": "Некорректные данные"}, 400)
+                return
+            if not isinstance(req, dict):
+                self._json({"error": "Некорректные данные"}, 400)
+                return
+            if str(req.get("website") or "").strip():
+                self._json({"ok": True})
+                return
+            name = re.sub(r"\s+", " ", str(req.get("name") or "").strip())[:120]
+            phone = re.sub(r"\s+", " ", str(req.get("phone") or "").strip())[:80]
+            message = str(req.get("message") or "").strip()[:1000]
+            page = str(req.get("page") or "/").strip()[:300]
+            digits = re.sub(r"\D", "", phone)
+            if len(digits) < 7:
+                self._json({"error": "Укажите номер телефона"}, 400)
+                return
+            lead = _add_lead(name, phone, message, page, self._ip())
+            if not lead:
+                self._json({"error": "Хранилище заявок временно недоступно"}, 503)
+                return
+            self._json({"ok": True, "id": lead["id"]})
+            return
+
         if path == "/admin/login":
             ip = self._ip()
             if _login_blocked(ip):
@@ -4206,6 +4482,22 @@ class Handler(BaseHTTPRequestHandler):
             else:                       # старый формат: сразу объект данных
                 payload, client_rev, force = body, None, True
             self._json(save_versioned(payload, client_rev, force, self._ip()))
+            return
+
+        if path == "/admin/api/leads/read":
+            if not self._admin():
+                self._json({"error": "no auth"}, 401)
+                return
+            try:
+                req = json.loads(self._body().decode("utf-8") or "{}")
+            except Exception:
+                req = {}
+            lead_id = req.get("id")
+            if lead_id is None:
+                _mark_lead(None, True)
+                self._json({"ok": True})
+            else:
+                self._json({"ok": _mark_lead(str(lead_id), True)})
             return
 
         if path == "/admin/api/upload":
